@@ -1,0 +1,22 @@
+llm: "exaone3.5"
+data_dir: "data"
+
+category:
+  - "주차"
+  - "화장실"
+  - "시설관리"
+  - "혼잡도"
+  - "접근성"
+  - "편의시설"
+  - "가성비"
+  - "아이 동반"
+  - "노약자 동반"
+  - "장소"
+  - "활동"
+
+split:
+  train_ratio: 0.8
+  dev_ratio: 0.1
+  seed: 42
+
+num_workers: 5

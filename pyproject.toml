@@ -3,18 +3,21 @@ name = "piknlp"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.12"
 dependencies = [
-    "alive-progress>=3.2.0",
-    "attrdict>=2.0.1",
+    "beautifulsoup4>=4.13.4",
+    "bson>=0.5.10",
+    "dotenv>=0.9.9",
+    "emoji>=2.14.1",
     "numpy<=2.2.5",
     "ollama>=0.4.8",
     "openai>=1.82.0",
     "pandas>=2.2.3",
     "pydantic>=2.11.5",
+    "pymongo>=4.13.0",
     "scikit-learn>=1.6.1",
     "seqeval>=1.2.2",
     "torch>=2.6.0",
-    "tqdm>=4.67.1",
     "transformers<=4.49",
+    "typer>=0.16.0",
 ]
