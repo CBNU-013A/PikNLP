@@ -107,5 +107,5 @@ def export_reviews_to_csv(output_path=None, min_length=10, max_reviews=None):
 
 if __name__ == "__main__":
     # 예시: 20자 이상인 리뷰 중 1000개만 저장
-    export_reviews_to_csv(output_path="data/raw/reviews.csv", min_length=20, max_reviews=1000) 
+    export_reviews_to_csv(output_path="data/sentiment/raw/reviews.csv", min_length=20, max_reviews=1000) 
 
