@@ -19,4 +19,4 @@ split:
   dev_ratio: 0.1
   seed: 42
 
-num_workers: 5
+num_workers: 4

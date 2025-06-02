@@ -30,43 +30,43 @@ class Trainer:
         self.args = args
 
     def train(self):
-        processor = Processor(self.args)
-        # 1. 데이터 토크나이징까지 해서 모델 넣기 전까지 상태로 전처리
-        # 2. 학습 루프 생성
-        # 3. 평가
-        # 4. 저장
+        # processor = Processor(self.args)
+        # # 1. 데이터 토크나이징까지 해서 모델 넣기 전까지 상태로 전처리
+        # # 2. 학습 루프 생성
+        # # 3. 평가
+        # # 4. 저장
         
-        tokenizer = TOKENIZER_CLASS[self.args.model_type].from_pretrained(
-            self.args.model_name_or_path,
-            do_lower_case=self.args.do_lower_case
-        )
-        config = CONFIG_CLASSES[self.args.model_type].from_pretrained(
-            self.args.model_name_or_path,
-            num_labels=len(processor.categories),
-            id2label={str(i): label for i, label in enumerate(processor.categories)},
-            label2id={label: i for i, label in enumerate(processor.categories)},
-        )
-        model = MODEL_FOR_TOKEN_CLASSIFICATION[self.args.model_type].from_pretrained(
-            self.args.model_name_or_path,
-            config=config
-        )
+        # tokenizer = TOKENIZER_CLASS[self.args.model_type].from_pretrained(
+        #     self.args.model_name_or_path,
+        #     do_lower_case=self.args.do_lower_case
+        # )
+        # config = CONFIG_CLASSES[self.args.model_type].from_pretrained(
+        #     self.args.model_name_or_path,
+        #     num_labels=len(processor.categories),
+        #     id2label={str(i): label for i, label in enumerate(processor.categories)},
+        #     label2id={label: i for i, label in enumerate(processor.categories)},
+        # )
+        # model = MODEL_FOR_TOKEN_CLASSIFICATION[self.args.model_type].from_pretrained(
+        #     self.args.model_name_or_path,
+        #     config=config
+        # )
 
-        # GPU or CPU
-        self.args.device = "cuda" if torch.cuda.is_available() and not self.args.no_cuda else "cpu"
-        model.to(self.args.device)
+        # # GPU or CPU
+        # self.args.device = "cuda" if torch.cuda.is_available() and not self.args.no_cuda else "cpu"
+        # model.to(self.args.device)
 
         # Merge dev set into train set and drop dev entirely
-        train_dataset_train = load_and_cache_examples(self.args, tokenizer, mode="train") if self.args.train_file else None
-        dev_dataset = load_and_cache_examples(self.args, tokenizer, mode="dev") if self.args.dev_file else None
-        from torch.utils.data import ConcatDataset
-        if dev_dataset is not None:
-            train_dataset = ConcatDataset([train_dataset_train, dev_dataset])
-        else:
-            train_dataset = train_dataset_train
-        dev_dataset = None
-        # always evaluate on test during training
-        self.args.evaluate_test_during_training = True
-        test_dataset = load_and_cache_examples(self.args, tokenizer, mode="test") if self.args.test_file else None
+        # train_dataset_train = load_and_cache_examples(self.args, tokenizer, mode="train") if self.args.train_file else None
+        # dev_dataset = load_and_cache_examples(self.args, tokenizer, mode="dev") if self.args.dev_file else None
+        # from torch.utils.data import ConcatDataset
+        # if dev_dataset is not None:
+        #     train_dataset = ConcatDataset([train_dataset_train, dev_dataset])
+        # else:
+        #     train_dataset = train_dataset_train
+        # dev_dataset = None
+        # # always evaluate on test during training
+        # self.args.evaluate_test_during_training = True
+        # test_dataset = load_and_cache_examples(self.args, tokenizer, mode="test") if self.args.test_file else None
 
         # K-Fold cross validation on train_dataset if requested
         if hasattr(self.args, "kfold_num") and self.args.kfold_num > 1:
