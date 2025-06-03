@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 import os
 from .generator import Generator
 from .train import SentimentTrainer
+from .test import SentimentTester
 from piknlp.common.config import Config
 
 app = typer.Typer()
@@ -37,6 +38,11 @@ def generate(
 def train():
     trainer = SentimentTrainer(config)
     trainer.train()
+
+@app.command("test")
+def test():
+    tester = SentimentTester(config)
+    tester.test()
 
 @app.command("upload")
 def upload_model(

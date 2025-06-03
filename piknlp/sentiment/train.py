@@ -20,6 +20,37 @@ from torch.utils.data import ConcatDataset, Subset, TensorDataset, WeightedRando
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, MofNCompleteColumn, TimeElapsedColumn, TimeRemainingColumn
 from sklearn.metrics import classification_report
 
+def convert_examples_to_features(config: Config, examples: list[InputExample], tokenizer: ElectraTokenizer, max_length: int) -> list[InputFeatures]:
+    """
+    Convert a list of InputExample objects to a list of InputFeatures objects.
+    Args:
+        config: Configuration object containing label_list
+        examples: A list of InputExample objects.
+        tokenizer: A tokenizer object.
+        max_length: The maximum length of the input sequence.
+    Returns:
+        A list of InputFeatures objects.
+    """
+    label_map: dict[str, int] = {label: i for i, label in enumerate(config.label_list)}
+    features: list[InputFeatures] = []
+    for ex in examples:
+        encoded: dict[str, torch.Tensor] = tokenizer(
+            text=ex.sentence,
+            text_pair=ex.category,
+            truncation=True,
+            max_length=max_length,
+            padding="max_length",
+        )
+        features.append(
+            InputFeatures(
+                input_ids=encoded["input_ids"],
+                attention_mask=encoded["attention_mask"],
+                token_type_ids=encoded.get("token_type_ids", [0] * max_length),
+                label=[label_map[ex.label]]
+            )
+        )
+    return features
+
 class BaseTrainer:
     logger: logging.Logger = get_logger(__name__)
     
@@ -67,36 +98,6 @@ class BaseTrainer:
                 examples.append(InputExample(guid=guid, sentence=sentence, category=cat, label=label))
         return examples
 
-    def convert_examples_to_features(self, examples: list[InputExample], tokenizer: ElectraTokenizer, max_length: int) -> list[InputFeatures]:
-        """
-        Convert a list of InputExample objects to a list of InputFeatures objects.
-        Args:
-            examples: A list of InputExample objects.
-            tokenizer: A tokenizer object.
-            max_length: The maximum length of the input sequence.
-        Returns:
-            A list of InputFeatures objects.
-        """
-        label_map: dict[str, int] = {label: i for i, label in enumerate(self.config.label_list)}
-        features: list[InputFeatures] = []
-        for ex in examples:
-            encoded: dict[str, torch.Tensor] = tokenizer(
-                text=ex.sentence,
-                text_pair=ex.category,
-                truncation=True,
-                max_length=max_length,
-                padding="max_length",
-            )
-            features.append(
-                InputFeatures(
-                    input_ids=encoded["input_ids"],
-                    attention_mask=encoded["attention_mask"],
-                    token_type_ids=encoded.get("token_type_ids", [0] * max_length),
-                    label=[label_map[ex.label]]
-                )
-            )
-        return features
-
     def load_and_cache_examples(self, mode: str) -> ConcatDataset:
         """
         Load and cache examples from a file.
@@ -130,7 +131,7 @@ class BaseTrainer:
                 raise ValueError(f"Invalid mode: {mode}")
 
             # Convert the examples to features
-            features = self.convert_examples_to_features(examples, self.tokenizer, self.config.max_seq_len)
+            features = convert_examples_to_features(self.config, examples, self.tokenizer, self.config.max_seq_len)
 
             # Save the features to the cached features file
             # TODO: check if the file is saved correctly
@@ -296,7 +297,7 @@ class BaseTrainer:
                 )
 
                 # 5. Save the best model
-                # 1) “final/final_epoch_model” 경로 지정
+                # 1) "final/final_epoch_model" 경로 지정
                 final_dir = self.model_dir / "final" / "final_epoch_model"
                 # 2) best_model 디렉토리를 지우고(존재하면)
                 best_dir = self.model_dir / "best_model"
