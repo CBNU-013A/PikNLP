@@ -7,7 +7,7 @@ import torch
 from pathlib import Path
 import json
 import numpy as np
-
+import shutil
 
 from piknlp.common.config import Config
 from piknlp.common.logger import get_logger
@@ -17,7 +17,7 @@ from sklearn.model_selection import StratifiedGroupKFold
 from transformers import ElectraTokenizer, ElectraForSequenceClassification, ElectraConfig, AdamW, get_linear_schedule_with_warmup
 from torch.utils.data import ConcatDataset, Subset, TensorDataset, WeightedRandomSampler, DataLoader, SequentialSampler
 
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, MofNCompleteColumn, TimeElapsedColumn, TimeRemainingColumn, track
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, MofNCompleteColumn, TimeElapsedColumn, TimeRemainingColumn
 from sklearn.metrics import classification_report
 
 class BaseTrainer:
@@ -118,7 +118,7 @@ class BaseTrainer:
         if cached_features_file.exists():
             # If the cached features file exists, load it
             features = torch.load(cached_features_file, weights_only=False)
-            self.logger.info(f"✅ Loaded cached features from {cached_features_file}")
+            self.logger.info(f"🔍 Loaded cached features from {cached_features_file}")
         else:
             # If the cached features file does not exist, create it and save it
             self.logger.info(f"🔄 Creating features for {mode} dataset")
@@ -135,7 +135,7 @@ class BaseTrainer:
             # Save the features to the cached features file
             # TODO: check if the file is saved correctly
             torch.save(features, cached_features_file)
-            self.logger.info(f"✅ Saved features to {cached_features_file}")
+            self.logger.info(f"💾 Saved features to {cached_features_file}")
         
         # Create a TensorDataset from the features
         all_input_ids: torch.Tensor = torch.tensor([f.input_ids for f in features], dtype=torch.long)
@@ -160,23 +160,21 @@ class BaseTrainer:
         model: ElectraForSequenceClassification = ElectraForSequenceClassification.from_pretrained(
             self.config.model_name, config=config_class)
         model.to(self.device)
-        self.logger.info(f"✅ Loaded model from {self.config.model_name}")
+        self.logger.info(f"🔍 Loaded model from {self.config.model_name}")
 
         # Load the train and test datasets
         train_dataset: ConcatDataset = self.load_and_cache_examples(mode="train")
         test_dataset: ConcatDataset = self.load_and_cache_examples(mode="test")
-        self.logger.info(f"✅ Loaded train and test datasets")
+        self.logger.info(f"🔍 Loaded train and test datasets")
 
         # If kfold_num is set, train the model with k-fold cross-validation
+        self.logger.info(f"-------------Start Training-------------")
         if hasattr(self.config, "kfold_num") and self.config.kfold_num > 1:
-            self.logger.info(f"K-Fold Training with {self.config.kfold_num} folds")
-            
-            all_labels: np.ndarray = np.array([labels.item() for _, _, _, labels in train_dataset])
-            num_categories: int = len(self.config.category)
-            groups: np.ndarray = np.arange(len(train_dataset)) // num_categories
-            
-            kf = StratifiedGroupKFold(n_splits=self.config.kfold_num, shuffle=True, random_state=self.config.kfold_seed)
-            
+            self.logger.debug(f"K-Fold Training with {self.config.kfold_num} folds")
+            total_folds: int = self.config.kfold_num
+            total_epochs: int = self.config.epochs
+            total_batches_init: int = 0
+
             # Store results for each fold
             fold_results = []
             
@@ -188,77 +186,154 @@ class BaseTrainer:
                 MofNCompleteColumn(),
                 TimeElapsedColumn(),
                 TimeRemainingColumn(),
+                redirect_stderr=True,
+                redirect_stdout=True
             ) as progress:
-                kfold_task = progress.add_task("[green]K-Fold Training...", total=self.config.kfold_num)
-                # For Each Fold
-                for fold, (train_idx, val_idx) in enumerate(kf.split(all_labels, all_labels, groups=groups)):
-                    progress.update(kfold_task, completed=fold, description=f"[green]K-Fold Training...{fold+1}/{self.config.kfold_num}")
+                # Add tasks to the progress bar
+                fold_task = progress.add_task("[cyan]K-Fold Training...", total=total_folds)
+                epoch_task = progress.add_task("[yellow]Epoch Training...", total=total_epochs)
+                batch_task = progress.add_task("[blue]Batch Training...", total=total_batches_init)
+                
+                # Create a StratifiedGroupKFold object
+                kf = StratifiedGroupKFold(
+                    n_splits=total_folds, 
+                    shuffle=True, 
+                    random_state=self.config.kfold_seed
+                )
+
+                # Calculate the number of categories
+                all_labels: np.ndarray = np.array([labels.item() for _, _, _, labels in train_dataset])
+                num_categories: int = len(self.config.category)
+                groups: np.ndarray = np.arange(len(train_dataset)) // num_categories
+                
+                # --- For Each Fold ---
+                # Split the train dataset into k-folds
+                for fold_idx, (train_idx, val_idx) in enumerate(kf.split(all_labels, all_labels, groups=groups), start=1):
+                    
+                    # Update the fold task in the progress bar
+                    progress.update(fold_task, completed=fold_idx, description=f"[cyan]K-Fold Training...")
 
                     # Create a Subset of the train/dev dataset for the current fold
                     fold_train: Subset = Subset(train_dataset, train_idx)
                     fold_dev: Subset = Subset(train_dataset, val_idx)
-
-                    # Define the output directory for the current fold
-                    fold_output_dir: Path = self.model_dir / f"fold_{fold+1}" # /data/sentiment/model/fold_1
+                    fold_output_dir: Path = self.model_dir / f"fold_{fold_idx}" # /data/sentiment/model/fold_1
+                    
+                    # Reset the epoch task in the progress bar
+                    progress.reset(epoch_task, total=total_epochs, completed=0, description="[yellow]Epoch Training...")
 
                     # Train the model on the current fold
-                    step, loss = self._train(model = model,
+                    step, loss, fold_best_f1 = self._train(model = model,
                                 train_dataset = fold_train,
                                 dev_dataset = fold_dev,
                                 test_dataset = test_dataset,
-                                output_dir = fold_output_dir)
+                                output_dir = fold_output_dir,
+                                progress = progress,
+                                epoch_task = epoch_task,
+                                batch_task = batch_task)
                     
                     # Evaluate and store results
-                    fold_result = self.evaluate(model, fold_dev, "dev", fold+1)
-                    fold_results.append(fold_result)
-                    
-                    self.logger.info(f"Fold {fold+1} done. global_step = {step}, average loss = {loss}")
-                
+                    dev_result = self.evaluate(model, fold_dev, "dev", fold_idx, progress=None)
+                    fold_results.append(dev_result)
+                    self.logger.debug(f"Fold {fold_idx} done. global_step = {step}, average loss = {loss}, best_f1 = {fold_best_f1}")
+
+                # ---After All Folds---
+                self.logger.info(f"-------------End K-Fold Training-------------")
                 # Calculate and log average metrics across folds
                 avg_metrics = {
                     "accuracy": np.mean([r["accuracy"] for r in fold_results]),
-                    "f1": np.mean([r["f1"] for r in fold_results]),
-                    "precision": np.mean([r["precision"] for r in fold_results]),
-                    "recall": np.mean([r["recall"] for r in fold_results])
+                    "f1":       np.mean([r["f1"] for r in fold_results]),
+                    "precision":np.mean([r["precision"] for r in fold_results]),
+                    "recall":   np.mean([r["recall"] for r in fold_results])
                 }
                 
-                self.logger.info(f"Average metrics across {self.config.kfold_num} folds:")
+                self.logger.info(f"📊 Average metrics across {self.config.kfold_num} folds:")
+                self.logger.info(f"| {'Metric':<10} | {'Value':<10} |")
+                self.logger.info(f"| {'-'*10} | {'-'*10} |")
                 for metric, value in avg_metrics.items():
-                    self.logger.info(f"{metric}: {value:.4f}")
-                
-                # Save average metrics
-                metrics_file = self.model_dir / "kfold_average_metrics.txt"
-                with open(metrics_file, "w") as f:
-                    for metric, value in avg_metrics.items():
-                        f.write(f"{metric}: {value:.4f}\n")
-                
+                    self.logger.info(f"| {metric:<10} | {value:<10.4f} |")
+                self.logger.info(f"| {'-'*10} | {'-'*10} |")
+
                 # Re-train the model on the full data and evaluate on the test set
-                self.logger.info("Re-training on full data and evaluating on test set")
-                global_step, tr_loss = self._train(
+                self.logger.info("-------------Start Re-Training-------------")
+                self.logger.info("🔄 Re-training on full data and evaluating on test set")
+
+                # 1. Reset the epoch task in the progress bar
+                if progress is not None and epoch_task is not None:
+                    progress.reset(
+                        epoch_task, 
+                        total=self.config.epochs, 
+                        completed=0, 
+                        description="[yellow]Re-Training..."
+                        )
+
+                # 2. Re-train the model on the full data and evaluate on the test set(dev = None)
+                global_step, tr_loss, _ = self._train(
                     model = model,
                     train_dataset = train_dataset,
                     dev_dataset = None,
                     test_dataset = test_dataset,
-                    output_dir = self.model_dir / "final")
-                self.logger.info("K-Fold Training done.")
+                    output_dir = self.model_dir / "final",
+                    progress = progress,
+                    epoch_task = epoch_task,
+                    batch_task = batch_task
+                    )
+                self.logger.debug(f"global_step = {global_step}, average loss = {tr_loss}")
+                
+                # 3. Save the best model
+                final_dir = self.model_dir / "final"
+                best_dir = self.model_dir / "best_model"
+                if best_dir.exists():
+                    shutil.rmtree(best_dir)
+                shutil.copytree(final_dir, best_dir)
+                self.logger.info(f"💾 Best model saved to {best_dir}")
+
+                # 4. Evaluate the best model on the test set
+                self.logger.info("-> Evaluating the best model on the test set")
+                test_result = self.evaluate(model, test_dataset, "test", epoch=-1, progress=None)
+                self.logger.info(
+                    f"📊 Test Results - Epoch -1: Accuracy: {test_result['accuracy']:.4f}, "
+                    f"F1: {test_result['f1']:.4f}, Loss: {test_result['eval_loss']:.4f}"
+                )
+
+                # 5. Save the best model
+                # 1) “final/final_epoch_model” 경로 지정
+                final_dir = self.model_dir / "final" / "final_epoch_model"
+                # 2) best_model 디렉토리를 지우고(존재하면)
+                best_dir = self.model_dir / "best_model"
+                if best_dir.exists():
+                    shutil.rmtree(best_dir)
+                # 3) 최종 모델을 best_model로 복사
+                shutil.copytree(final_dir, best_dir)
+                self.logger.info(f"🏆 True final model copied to {best_dir}")
+
+                self.logger.info("-------------End Re-Training-------------")
         else:
             # No K-Fold, regular train/test
-            self.logger.info("No K-Fold, regular train/test")
+            self.logger.info("-------------Start Training-------------")
+            self.logger.info("🔄 No K-Fold, regular train/test")
             # Train the model on the full data and evaluate on the test set
-            global_step, tr_loss = self._train(model = model,
-                                                train_dataset = train_dataset,
-                                                dev_dataset = None,
-                                                test_dataset = test_dataset,
-                                                output_dir = self.model_dir / "final")
+            global_step, tr_loss = self._train(
+                model = model,
+                train_dataset = train_dataset,
+                dev_dataset = None,
+                test_dataset = test_dataset,
+                output_dir = self.model_dir / "final",
+                progress = None,
+                epoch_task = None,
+                batch_task = None)
             self.logger.info(f"global_step = {global_step}, average loss = {tr_loss}")
-            self.logger.info("Training done.")
+            self.logger.info("-------------End Training-------------")
+            
 
     def _train(self, 
                model: ElectraForSequenceClassification, 
                train_dataset: ConcatDataset, 
                dev_dataset: ConcatDataset | None, 
                test_dataset: ConcatDataset | None,
-               output_dir: Path) -> tuple[int, float]:
+               output_dir: Path,
+               progress: Progress | None = None,
+               epoch_task: int | None = None,
+               batch_task: int | None = None) -> tuple[int, float, float]:
         """
         Train the model.
         Args:
@@ -267,32 +342,33 @@ class BaseTrainer:
             dev_dataset: A dev dataset object.
             test_dataset: A test dataset object.
             output_dir: The directory to save the model.
+            progress: Progress object for showing progress bars.
         Returns:
-            A tuple of the global step and the average loss.
+            A tuple of the global step, the average loss, and the best F1 score.
         """
-        self.logger.info(f"🚀 Training Started...")
+        self.logger.debug(f"🚀 Training Started...")
         
         # Early stopping setup
         best_f1 = 0.0
         patience = self.config.early_stopping_patience
         patience_counter = 0
-        best_model_path = None
         
         # 1. Count the number of samples for each label
-        label_counts: dict[int, int] = {label: 0 for label in self.config.label_list}
+        label_counts: dict[int, int] = {i: 0 for i in range(len(self.config.label_list))}
         for _, _, _, labels in train_dataset:
-            label_counts[labels.item()] += 1
+            idx = labels.item()
+            label_counts[idx] += 1
         self.logger.debug(f"Label distribution: {label_counts}")
         
         # 2. Calculate the class weights(less frequent class has higher weight)
-        max_count: int = max(label_counts.values()) if label_counts.values() else 0
+        max_count: int = max(label_counts.values(), default=0)
         class_weights: dict[int, float] = {}
         for class_id, count in label_counts.items():
             # class with 0 count has weight 0
             class_weights[class_id] = (max_count / count) if count > 0 else 0.0
         
         # 3. Assign weights to each sample
-        weights: list[float] = [class_weights.get(labels.item(), 0.0) for _, _, _, labels in train_dataset]
+        weights: list[float] = [class_weights[labels.item()] for _, _, _, labels in train_dataset]
         self.logger.debug(f"Class weights: {class_weights}")
 
         # 4. Create a WeightedRandomSampler
@@ -346,99 +422,124 @@ class BaseTrainer:
         tr_loss: float = 0.0
         model.zero_grad()
 
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            MofNCompleteColumn(),
-            TimeElapsedColumn(),
-            TimeRemainingColumn(),
-        ) as progress:
-            # 9-1. Epoch Loop
-            for epoch in range(int(self.config.epochs)):
-                # 9-1-1. Epoch Start
-                self.logger.info(f"Epoch {epoch+1} started.")
-                task = progress.add_task(f"[green]Epoch {epoch+1}", total=len(train_dataloader))
+        # 9-1. Epoch Loop
+        for epoch_idx in range(1, int(self.config.epochs)+1):
+            # 9-1-1. Epoch Start
+            if progress is not None and epoch_task is not None:
+                progress.update(
+                    epoch_task,
+                    completed=epoch_idx,
+                    description=f"[yellow]Epoch Training..."
+                )
+            # 9-1-2. Re-generate the train_dataloader for batch loop
+            train_dataloader = DataLoader(
+                train_dataset,
+                sampler=train_sampler,
+                batch_size=self.config.train_batch_size
+            )
+            num_batches: int = len(train_dataloader)
 
-                # 9-1-2. Step Loop
-                for step, batch in track(enumerate(train_dataloader), description="[green]Training...", total=len(train_dataloader)):
-                    # 9-1-2-1. Step Start
-                    model.train()
-                    # 9-1-2-2. Batch to Device
-                    batch = tuple(t.to(self.device) for t in batch)
-                    # 9-1-2-3. Forward Pass
-                    inputs = {
-                        "input_ids": batch[0],
-                        "attention_mask": batch[1],
-                        "token_type_ids": batch[2],
-                        "labels": batch[3]
-                    }
-                    outputs = model(**inputs)
-                    # 9-1-2-4. Calculate Loss
-                    loss = outputs[0]
-                    # 9-1-2-5. Gradient Accumulation
-                    if self.config.gradient_accumulation_steps > 1:
-                        loss = loss / self.config.gradient_accumulation_steps
-                    # 9-1-2-6. Backward Pass
-                    loss.backward()
-                    # 9-1-2-7. Update Loss
-                    tr_loss += loss.item()
-                    # 9-1-2-8. Gradient Clipping & Optimizer Step
-                    if (step + 1) % self.config.gradient_accumulation_steps == 0 or (
-                        len(train_dataloader) <= self.config.gradient_accumulation_steps and (step + 1) == len(train_dataloader)
-                    ):
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), self.config.max_grad_norm)
-                        optimizer.step()
-                        scheduler.step()
-                        model.zero_grad()
-                        global_step += 1
-                    
-                    progress.update(task, completed=step+1)
-                
-                # 9-1-3. Epoch End - Evaluate & Save
-                self.logger.info(f"Epoch {epoch+1} finished. Evaluating...")
-                
-                # Evaluate on dev set if available
-                if dev_dataset is not None:
-                    dev_result = self.evaluate(model, dev_dataset, "dev", epoch+1)
-                    current_f1 = dev_result["f1"]
-                    
-                    # Early stopping check
-                    if current_f1 > best_f1:
-                        best_f1 = current_f1
-                        patience_counter = 0
-                        # Save best model
-                        best_model_path = output_dir / f"best_model"
-                        best_model_path.mkdir(parents=True, exist_ok=True)
-                        self.save_best_model(model=model, output_dir=best_model_path)
-                        self.logger.info(f"✅ New best model saved to {best_model_path} with F1: {best_f1:.4f}")
-                    else:
-                        patience_counter += 1
-                        self.logger.info(f"Early stopping patience: {patience_counter}/{patience}")
-                        
-                    if patience_counter >= patience:
-                        self.logger.info(f"Early stopping triggered after {epoch+1} epochs")
-                        break
-                
-                # Evaluate on test set
-                self.evaluate(model, test_dataset, "test", epoch+1)
-                
-                # Save checkpoint at end of each epoch
-                epoch_output_dir = output_dir / f"ckpt" /f"epoch_{epoch+1}"
-                epoch_output_dir.mkdir(parents=True, exist_ok=True)
-                model_to_save = model.module if hasattr(model, "module") else model
-                model_to_save.save_pretrained(epoch_output_dir)
-                self.logger.info(f"✅ Model saved to {epoch_output_dir}")
-                
-                self.logger.info(f"Epoch {epoch+1} done.")
+            # Reset the batch task in the progress bar
+            if progress is not None and batch_task is not None:
+                progress.reset(
+                    batch_task, 
+                    total=num_batches,
+                    completed=0,
+                    description="[blue]Batch Training..."
+                )
 
-        return global_step, tr_loss
+            # 9-1-3. Batch Loop
+            for batch_idx, batch in enumerate(train_dataloader, start=1):
+                # 9-1-3-1. Batch Start
+                model.train()
+                # 9-1-3-2. Batch to Device
+                batch = tuple(t.to(self.device) for t in batch)
+                # 9-1-3-3. Forward Pass
+                inputs = {
+                    "input_ids": batch[0],
+                    "attention_mask": batch[1],
+                    "token_type_ids": batch[2],
+                    "labels": batch[3]
+                }
+                outputs = model(**inputs)
+                # 9-1-3-4. Calculate Loss
+                loss = outputs[0]
+                # 9-1-3-5. Gradient Accumulation
+                if self.config.gradient_accumulation_steps > 1:
+                    loss = loss / self.config.gradient_accumulation_steps
+                # 9-1-3-6. Backward Pass
+                loss.backward()
+                # 9-1-3-7. Update Loss
+                tr_loss += loss.item()
+                # 9-1-3-8. Gradient Clipping & Optimizer Step
+                if (batch_idx + 1) % self.config.gradient_accumulation_steps == 0 or (
+                    num_batches <= self.config.gradient_accumulation_steps and (batch_idx + 1) == num_batches
+                ):
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), self.config.max_grad_norm)
+                    optimizer.step()
+                    scheduler.step()
+                    model.zero_grad()
+                    global_step += 1
+                
+                # 9-1-3-9. Update the batch task in the progress bar
+                if progress is not None and batch_task is not None:
+                    progress.update(
+                        batch_task,
+                        completed=batch_idx,
+                        description=f"[blue]Batch Training..."
+                    )
+            
+            # 9-1-4. Epoch End - Evaluate & Save
+            self.logger.debug(f"Epoch {epoch_idx} finished. Evaluating...")
+            
+            # 9-1-4-1. Evaluate on dev set if available
+            if dev_dataset is not None:
+                dev_result = self.evaluate(model, dev_dataset, "dev", epoch_idx, progress=None)
+                current_f1 = dev_result["f1"]
+                
+                # Early stopping check
+                if current_f1 > best_f1:
+                    best_f1 = current_f1
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                    self.logger.debug(f"Early stopping patience: {patience_counter}/{patience}")
+                if patience_counter >= patience:
+                    self.logger.debug(f"Early stopping triggered after {epoch_idx} epochs")
+                    break
+            
+            # Evaluate on test set
+            self.evaluate(model, test_dataset, "test", epoch_idx, progress=None)
+            
+            # Save checkpoint at end of each epoch
+            epoch_output_dir = output_dir / f"ckpt" /f"epoch_{epoch_idx}"
+            epoch_output_dir.mkdir(parents=True, exist_ok=True)
+            model_to_save = model.module if hasattr(model, "module") else model
+            model_to_save.save_pretrained(epoch_output_dir)
+            self.tokenizer.save_pretrained(epoch_output_dir)
+            self.logger.debug(f"💾 Model saved to {epoch_output_dir}")
+            
+            self.logger.debug(f"Epoch {epoch_idx} done.")
+
+
+        # Save the Best Model
+        final_epoch_dir = output_dir / "final_epoch_model"
+        if final_epoch_dir.exists():
+            shutil.rmtree(final_epoch_dir)
+        final_epoch_dir.mkdir(parents=True, exist_ok=True)
+        model_to_save = model.module if hasattr(model, "module") else model
+        model_to_save.save_pretrained(final_epoch_dir)
+        self.tokenizer.save_pretrained(final_epoch_dir)
+        self.logger.info(f"💾 Final epoch model saved to {final_epoch_dir}")
+
+        return global_step, tr_loss, best_f1
 
     def evaluate(self, 
                  model: ElectraForSequenceClassification, 
                  eval_dataset: ConcatDataset, 
                  mode: str, 
-                 epoch: int = -1) -> dict:
+                 epoch: int = -1,
+                 progress: Progress | None = None) -> dict:
         
         eval_sampler: SequentialSampler = SequentialSampler(eval_dataset)
         eval_dataloader: DataLoader = DataLoader(eval_dataset, 
@@ -451,7 +552,11 @@ class BaseTrainer:
         nb_eval_steps = 0
         preds = None
         out_label_ids = None
-        for batch in track(eval_dataloader, description=f"[green]Evaluating {mode}...", total=len(eval_dataloader)):
+
+        # if progress is not None:
+        #     task = progress.add_task(f"[green]Evaluating {mode}...", total=len(eval_dataloader))
+        
+        for batch in eval_dataloader:
             model.eval()
             batch = tuple(t.to(self.device) for t in batch)
 
@@ -474,12 +579,20 @@ class BaseTrainer:
                 preds = np.append(preds, logits.detach().cpu().numpy(), axis=0)
                 out_label_ids = np.append(out_label_ids, inputs["labels"].detach().cpu().numpy(), axis=0)
 
+            # if progress is not None:
+            #     progress.update(task, completed=nb_eval_steps)
 
         eval_loss = eval_loss / nb_eval_steps
         preds = np.argmax(preds, axis=1)
 
         # Detailed per-class metrics
-        report = classification_report(out_label_ids, preds, target_names=self.config.category, digits=3)
+        report = classification_report(
+            out_label_ids, 
+            preds, 
+            target_names=self.config.label_list, 
+            digits=3,
+            zero_division=0
+        )
         
         # Create evaluation output directory  
         eval_output_dir = self.model_dir / "evaluation" / mode
@@ -509,7 +622,7 @@ class BaseTrainer:
             for key in sorted(result.keys()):
                 f_w.write(f"{key} = {result[key]}\n")
 
-        self.logger.info(f"📊 {mode.upper()} Results - Epoch {epoch}: Accuracy: {accuracy:.4f}, F1: {f1:.4f}, Loss: {eval_loss:.4f}")
+        self.logger.debug(f"📊 {mode.upper()} Results - Epoch {epoch}: Accuracy: {accuracy:.4f}, F1: {f1:.4f}, Loss: {eval_loss:.4f}")
         
         return result
 
@@ -579,7 +692,7 @@ class BaseTrainer:
         with open(output_dir / "README.md", "w", encoding="utf-8") as f:
             f.write(readme_content)
         
-        self.logger.info(f"✅ Model saved to {output_dir}")
+        self.logger.debug(f"💾 Model saved to {output_dir}")
 
 class SentimentTrainer(BaseTrainer):
     def __init__(self, config: Config) -> None:
