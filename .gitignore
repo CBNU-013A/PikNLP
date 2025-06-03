@@ -6,3 +6,6 @@ __pycache__/
 model/processed/
 checkpoint-*
 test-*.txt
+
+.venv/
+.env
