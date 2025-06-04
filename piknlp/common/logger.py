@@ -14,7 +14,7 @@ logging.basicConfig(
     handlers=[RichHandler(markup=True, rich_tracebacks=True)]
 )
 
-logging.getLogger("transformers").setLevel(logging.WARNING)
+logging.getLogger("transformers").setLevel(logging.ERROR)
 logging.getLogger("sklearn").setLevel(logging.WARNING)
 logging.getLogger("torch").setLevel(logging.WARNING)
 

@@ -18,6 +18,6 @@ dependencies = [
     "scikit-learn>=1.6.1",
     "seqeval>=1.2.2",
     "torch>=2.6.0",
-    "transformers<=4.49",
+    "transformers<=4.50",
     "typer>=0.16.0",
 ]
