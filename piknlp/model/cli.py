@@ -6,7 +6,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 import os
 from piknlp.model.train import SentimentTrainer
-from piknlp.model.test import SentimentTester, MultiHeadTester
+from piknlp.model.test import SentimentTester, CategoryTester
 from piknlp.common.config import Config
 from piknlp.model.multi_train import MultiHeadTrainer
 
@@ -46,7 +46,7 @@ def test():
     if config.task == "sentiment":
         tester = SentimentTester(config)
     elif config.task == "category":
-        tester = MultiHeadTester(config)
+        tester = CategoryTester(config)
     else:
         raise ValueError(f"Invalid task: {config.task}")
     tester.test()

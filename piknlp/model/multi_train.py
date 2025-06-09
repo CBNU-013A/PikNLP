@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from torch.utils.data.sampler import WeightedRandomSampler, SequentialSampler
 import os
 from torch.optim import AdamW
-from transformers import get_linear_schedule_with_warmup
+from transformers import get_linear_schedule_with_warmup, AutoConfig
 from typing import Any
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, MofNCompleteColumn, TimeElapsedColumn, TimeRemainingColumn
 from sklearn.metrics import classification_report, f1_score
@@ -19,17 +19,35 @@ import numpy as np
 from safetensors.torch import save_file
 import json
 from pathlib import Path
+from transformers import PretrainedConfig
+
+class CategoryConfig(PretrainedConfig):
+    model_type = "electra"
+    def __init__(self,
+                 model_name: str = "",
+                 category2label: dict[str, list[str]] | None = None, 
+                 max_seq_length: int = 256,
+                 dropout_rate: float = 0.1,
+                 **kwargs):
+        super().__init__(**kwargs)
+        self.model_name = model_name
+        self.category2label = category2label or {}
+        self.categories = list(self.category2label.keys())
+        self.max_seq_length = max_seq_length
+        self.dropout_rate = dropout_rate
 
 class MultiHeadClassifier(nn.Module):
-    def __init__(self, config: Config):
+
+    def __init__(self, config: CategoryConfig):
         super().__init__()
         self.encoder = ElectraModel.from_pretrained(config.model_name)
         self.dropout = nn.Dropout(config.dropout_rate)
+        self.config = config
 
         # 카테고리마다 head를 따로 두는 구조
         self.heads = nn.ModuleDict({
             cat: nn.Linear(self.encoder.config.hidden_size, len(sub_labels))
-            for cat, sub_labels in config.category.items()
+            for cat, sub_labels in config.category2label.items()
         })
 
     def forward(self, input_ids, attention_mask, token_type_ids):
@@ -172,7 +190,6 @@ class MultiHeadTrainer(BaseTrainer):
             "labels": label_tensors
         })
     
-    
     def train(self):
         train_dataset = self.load_and_cache_examples("train")
         test_dataset = self.load_and_cache_examples("test")
@@ -188,7 +205,16 @@ class MultiHeadTrainer(BaseTrainer):
         train_dataloader = DataLoader(train_dataset, batch_size=self.config.train_batch_size, shuffle=True, num_workers=self.config.num_workers)
         test_dataloader = DataLoader(test_dataset, batch_size=self.config.eval_batch_size, shuffle=False, num_workers=self.config.num_workers)
         
-        model = MultiHeadClassifier(self.config)
+        base_config = AutoConfig.from_pretrained(self.config.model_name)
+        cat_config = CategoryConfig(
+            model_name = self.config.model_name,
+            category2label = self.config.category,
+            max_seq_length = self.config.max_seq_len,
+            dropout_rate = self.config.dropout_rate,
+            **base_config.to_dict()
+        )
+
+        model = MultiHeadClassifier(cat_config)
         model.to(self.device)
         optimizer = AdamW(model.parameters(), lr=self.config.learning_rate)
         scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=0, num_training_steps=len(train_dataloader) * self.config.epochs)
@@ -249,35 +275,20 @@ class MultiHeadTrainer(BaseTrainer):
             eval_score = self._evaluate(model, test_dataloader)
             if eval_score > best_score:
                 best_score = eval_score
-                self._save_model(model, self.model_dir / "best_model")
-                self.tokenizer.save_pretrained(self.model_dir / "best_model")
+                ckpt_dir = Path(self.model_dir) / "best_model"
+                self._save_model(model, ckpt_dir)
+                self.tokenizer.save_pretrained(ckpt_dir)
+                self.logger.info(f"💾 Best model saved to {ckpt_dir}")
     
-    def _save_model(self, model: MultiHeadClassifier, save_dir: str | None = None):
-        if save_dir is None:
-            save_dir = os.path.join(self.model_dir, "multihead")
-        os.makedirs(save_dir, exist_ok=True)
+    def _save_model(self, model: MultiHeadClassifier, save_dir: Path):
+        save_dir.mkdir(parents=True, exist_ok=True)
 
-        # 1. 모델 파라미터 저장 (.safetensors)
-        model_path = os.path.join(save_dir, "model.safetensors")
-        # 1) state_dict 가져오기
+        model_path = save_dir / "model.safetensors"
         state_dict = model.state_dict()
-        # 2) 모든 텐서를 contiguous() 처리
-        contig_state = {k: v.contiguous() for k, v in state_dict.items()}
-        # 3) 저장
-        save_file(contig_state, model_path)
+        config_state = {k: v.contiguous() for k, v in state_dict.items()}
+        save_file(config_state, model_path)
 
-        # 2. config 저장
-        config_data = {
-            "model_type": "multihead",
-            "categories": self.main_categories,
-            "category2label": self.config.category,
-            "max_seq_length": self.config.max_seq_len,
-        }
-        config_path = os.path.join(save_dir, "config.json")
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(config_data, f, ensure_ascii=False, indent=2)
-
-        print(f"💾 모델 저장됨 (safetensors): {model_path}")
+        model.config.save_pretrained(str(save_dir))
 
     @torch.no_grad()
     def _evaluate(self, model: MultiHeadClassifier, dataloader: DataLoader) -> float:
