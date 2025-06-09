@@ -6,8 +6,9 @@ from pathlib import Path
 from dotenv import load_dotenv
 import os
 from piknlp.model.train import SentimentTrainer
-from piknlp.model.test import SentimentTester
+from piknlp.model.test import SentimentTester, MultiHeadTester
 from piknlp.common.config import Config
+from piknlp.model.multi_train import MultiHeadTrainer
 
 app = typer.Typer()
 
@@ -16,12 +17,25 @@ load_dotenv()
 
 config = Config()
 
+@app.command("multi_train")
+def multi_train():
+    """
+    Train the model with multiple heads.
+    """
+    trainer = MultiHeadTrainer(config)
+    trainer.train()
+
 @app.command("train")
 def train():
     """
     Train the model.
     """
-    trainer = SentimentTrainer(config)
+    if config.task == "sentiment":
+        trainer = SentimentTrainer(config)
+    elif config.task == "category":
+        trainer = MultiHeadTrainer(config)
+    else:
+        raise ValueError(f"Invalid task: {config.task}")
     trainer.train()
 
 @app.command("test")
@@ -29,7 +43,12 @@ def test():
     """
     Test the model.
     """
-    tester = SentimentTester(config)
+    if config.task == "sentiment":
+        tester = SentimentTester(config)
+    elif config.task == "category":
+        tester = MultiHeadTester(config)
+    else:
+        raise ValueError(f"Invalid task: {config.task}")
     tester.test()
 
 @app.command("upload")

@@ -11,9 +11,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from piknlp.common.config import Config
 from piknlp.common.logger import get_logger
-from piknlp.schema.generator import ReviewSample, SentimentList, ReviewLabel
+from piknlp.schema.generator import Review_Sentiment_Sample, Review_Category_Sample, SentimentList, CategoryList, Review_Sentiment_Label
 from piknlp.generator.llm import call_ollama as call_llm
-from piknlp.generator.llm import generate_dataset_prompt
+from piknlp.generator.llm import generate_dataset_prompt, generate_category_prompt
 
 class Generator:
     logger: logging.Logger = get_logger(__name__)
@@ -28,7 +28,7 @@ class Generator:
         self.logger.info(f"🚀 Start generating dataset")
         self.logger.debug(f"Processing {raw_file_path}")
         reviews: list[str] = self._load_csv(raw_file_path)
-        labeled_data: list[ReviewSample] = []
+        labeled_data: list[Review_Sentiment_Sample | Review_Category_Sample] = []
 
         with Progress(
             SpinnerColumn(),
@@ -42,9 +42,14 @@ class Generator:
             with ThreadPoolExecutor(max_workers=self.config.num_workers) as executor:
                 futures = [executor.submit(self._process_review, review) for review in reviews]
                 for f in as_completed(futures):
-                    sample = f.result()
-                    labeled_data.append(sample)
-                    progress.update(task, advance=1)
+                    try:
+                        sample = f.result()
+                        if sample.label:  # 유효한 레이블이 있는 경우만 추가
+                            labeled_data.append(sample)
+                    except Exception as e:
+                        self.logger.error(f"Error processing review: {e}")
+                    finally:
+                        progress.update(task, advance=1)
         
         save_path = self.config.task_dir / "dataset" / f"{self.config.task}.jsonl" # /data/sentiment/dataset/sentiment.jsonl
         self._save_json(labeled_data, save_path)
@@ -96,34 +101,55 @@ class Generator:
             match = re.search(r"\{[\s\S]*\}", text)
             if match:
                 json_str = match.group(0)
-                # 키 변환
+                # JSON 파싱 시도
                 data = json.loads(json_str)
-                if "labels" in data:
-                    data["sentiments"] = data.pop("labels")
+                # categories 키가 없으면 추가
+                if "categories" not in data:
+                    data = {"categories": data}
                 return json.dumps(data, ensure_ascii=False)
         except Exception as e:
             self.logger.error(f"⚠️ JSON extraction failed: {e}")
         return "{}"
 
-    def _parse_labels(self, response: SentimentList) -> list[ReviewLabel]:
+    def _parse_labels(self, response: SentimentList | CategoryList) -> dict[str, str] | list[Review_Sentiment_Label]:
         try:
-            assert isinstance(response, SentimentList), "Response type mismatch"
-            return [
-                ReviewLabel(category=cat, review=sentiment)
-                for cat, sentiment in response.sentiments.items()
-            ]
+            if isinstance(response, SentimentList):
+                return [
+                    Review_Sentiment_Label(category=cat, review=sentiment)
+                    for cat, sentiment in response.sentiments.items()
+                ]
+            elif isinstance(response, CategoryList):
+                return {cat: sub_cat for cat, sub_cat in response.categories.items()}
+            else:   
+                raise ValueError(f"Invalid response type: {type(response)}")
         except Exception as e:
             self.logger.error(f"Error parsing labels: {e}")
             return []
+    
+    def _process_review(self, review: str) -> Review_Sentiment_Sample | Review_Category_Sample:
+        if self.config.task == "category":
+            prompt = generate_category_prompt(review, self.config.category)
+            response_class = CategoryList
+        elif self.config.task == "sentiment":
+            prompt = generate_dataset_prompt(review, self.config.category)
+            response_class = SentimentList
+        else:
+            raise ValueError(f"Invalid task: {self.config.task}")
 
-    def _process_review(self, review: str) -> ReviewSample:
-        prompt = generate_dataset_prompt(review, self.config.category)
         raw_response = call_llm(prompt)
         clean_response = self._extract_json(raw_response)
         try:
-            response_obj = SentimentList.model_validate_json(clean_response)
+            response_obj = response_class.model_validate_json(clean_response)
             labels = self._parse_labels(response_obj)
         except Exception as e:
             self.logger.error(f"Error parsing labels: {e}")
+            self.logger.debug(f"Raw response: {raw_response}")
+            self.logger.debug(f"Cleaned response: {clean_response}")
             labels = []
-        return ReviewSample(sentence=review, label=labels)
+
+        if self.config.task == "sentiment":
+            return Review_Sentiment_Sample(sentence=review, label=labels)
+        elif self.config.task == "category":
+            return Review_Category_Sample(sentence=review, label=labels)
+        else:
+            raise ValueError(f"Invalid task: {self.config.task}")

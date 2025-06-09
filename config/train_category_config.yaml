@@ -1,0 +1,75 @@
+task: "category"
+
+nlp_model_name: "monologg/koelectra-small-v3-discriminator"
+llm_model_name: "exaone3.5"
+cuda: true
+
+# file names
+raw_data_file: "reviews.csv"
+dataset_file: "dataset.jsonl"
+train_file: "train.jsonl"
+test_file: "test.jsonl"
+
+# Hierarchical Category Structure
+category:
+  장소:
+    - 자연/경관
+    - 역사/문화
+    - 건축/시설
+    - 전시/예술
+    - none
+  활동:
+    - 산책/등산/트레킹
+    - 관람/견학
+    - 체험/참여 프로그램
+    - 공연/행사
+    - 식사/카페
+    - 쇼핑/기념품
+    - none
+  동반:
+    - 혼자
+    - 부모님
+    - 연인
+    - 친구
+    - 반려동물
+    - 아이
+    - none
+  계절:
+    - 봄
+    - 여름
+    - 가을
+    - 겨울
+    - none
+
+# Dataset Generation parameters
+split:
+  train_ratio: 0.8
+  dev_ratio: 0.1
+  seed: 42
+num_workers: 4
+
+# K-Fold parameters
+kfold_num: 5
+kfold_seed: 42
+
+# Training parameters
+max_seq_len: 256
+train_batch_size: 32
+eval_batch_size: 64
+max_steps: 0
+epochs: 30
+gradient_accumulation_steps: 1
+weight_decay: 0.01
+learning_rate: 5e-5
+adam_epsilon: 1e-8
+warmup_proportion: 0.1
+max_grad_norm: 1.0
+early_stopping_patience: 3
+dropout_rate: 0.1
+
+# Evaluation parameters
+eval_num_workers: 4
+
+# Huggingface Hub parameters
+hf_repo_name: "CBNU-013A/piknlp-category"  # Huggingface Hub 저장소 이름
+

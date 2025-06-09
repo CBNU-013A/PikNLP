@@ -11,7 +11,7 @@ import shutil
 
 from piknlp.common.config import Config
 from piknlp.common.logger import get_logger
-from piknlp.schema.train import InputExample, InputFeatures
+from piknlp.schema.train import InputExample, InputFeatures, Input_Category_Example, Input_Category_Features
 
 from sklearn.model_selection import StratifiedGroupKFold
 from transformers import ElectraTokenizer, ElectraForSequenceClassification, ElectraConfig, AdamW, get_linear_schedule_with_warmup
@@ -20,7 +20,7 @@ from torch.utils.data import ConcatDataset, Subset, TensorDataset, WeightedRando
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, MofNCompleteColumn, TimeElapsedColumn, TimeRemainingColumn
 from sklearn.metrics import classification_report
 
-def convert_examples_to_features(config: Config, examples: list[InputExample], tokenizer: ElectraTokenizer, max_length: int) -> list[InputFeatures]:
+def convert_examples_to_features(config: Config, examples: list[InputExample|Input_Category_Example], tokenizer: ElectraTokenizer, max_length: int) -> list[InputFeatures|Input_Category_Features]:
     """
     Convert a list of InputExample objects to a list of InputFeatures objects.
     Args:
@@ -32,7 +32,7 @@ def convert_examples_to_features(config: Config, examples: list[InputExample], t
         A list of InputFeatures objects.
     """
     label_map: dict[str, int] = {label: i for i, label in enumerate(config.label_list)}
-    features: list[InputFeatures] = []
+    features: list[InputFeatures|Input_Category_Features] = []
     for ex in examples:
         encoded: dict[str, torch.Tensor] = tokenizer(
             text=ex.sentence,
@@ -41,6 +41,7 @@ def convert_examples_to_features(config: Config, examples: list[InputExample], t
             max_length=max_length,
             padding="max_length",
         )
+
         features.append(
             InputFeatures(
                 input_ids=encoded["input_ids"],
@@ -60,8 +61,25 @@ class BaseTrainer:
         self.logger.info(f"Using device: {self.device}")
         self.model_dir: Path = self.config.task_dir / "model" # /data/sentiment/model
         self.model_dir.mkdir(parents=True, exist_ok=True)
-        
         self.tokenizer: ElectraTokenizer = ElectraTokenizer.from_pretrained(self.config.model_name)
+
+    def create_examples(self):
+        raise NotImplementedError("Subclasses must implement this method")
+    
+    def convert_examples_to_features(self):
+        raise NotImplementedError("Subclasses must implement this method")
+    
+    def convert_to_dataset(self):
+        raise NotImplementedError("Subclasses must implement this method")
+    
+    def train(self):
+        raise NotImplementedError("Subclasses must implement this method")
+    
+    def _train(self):
+        raise NotImplementedError("Subclasses must implement this method")
+    
+    def evaluate(self):
+        raise NotImplementedError("Subclasses must implement this method")
 
     def read_file(self, input_file: Path) -> list[dict]:
         """
@@ -78,6 +96,97 @@ class BaseTrainer:
         self.logger.info(f"📂 Loaded {len(data)} samples from {input_file}")
         return data
 
+    def load_and_cache_examples(self, mode: str):
+        cached_features_dir = self.model_dir / "interim"
+        cached_features_dir.mkdir(parents=True, exist_ok=True)
+
+        model_name = self.config.model_name.split("/")[-1]
+        cached_features_file = cached_features_dir / f"cached_{model_name}_{self.config.max_seq_len}_{mode}.pt"
+
+        if cached_features_file.exists():
+            features = torch.load(cached_features_file, weights_only=False)
+            self.logger.info(f"🔍 Loaded cached features from {cached_features_file}")
+        else:
+            lines = self.read_file(self.config.task_dir / "dataset" / getattr(self.config, f"{mode}_file"))
+            examples = self.create_examples(lines, mode)
+            features = self.convert_examples_to_features(examples)
+            torch.save(features, cached_features_file)
+            self.logger.info(f"💾 Saved features to {cached_features_file}")
+
+        return self.convert_to_dataset(features)
+    
+    def upload_to_huggingface(self, model_path: Path, repo_name: str, token: str) -> None:
+        """
+        학습된 모델을 Huggingface Hub에 업로드합니다.
+        Args:
+            model_path: 업로드할 모델의 경로
+            repo_name: Huggingface Hub의 저장소 이름 (예: "username/model-name")
+            token: Huggingface API 토큰
+        """
+        from huggingface_hub import HfApi, create_repo
+        
+        self.logger.info(f"🚀 Uploading model to Huggingface Hub: {repo_name}")
+        
+        try:
+            # 저장소가 없으면 생성
+            create_repo(repo_name, token=token, exist_ok=True)
+            
+            # API 클라이언트 생성
+            api = HfApi()
+            
+            # 모델 파일 업로드
+            api.upload_folder(
+                folder_path=model_path,
+                repo_id=repo_name,
+                token=token
+            )
+            
+            self.logger.info(f"✅ Model successfully uploaded to {repo_name}")
+            
+        except Exception as e:
+            self.logger.error(f"❌ Failed to upload model: {str(e)}")
+            raise
+
+    def save_best_model(self, model: ElectraForSequenceClassification, output_dir: Path) -> None:
+        """
+        최적의 모델을 저장합니다.
+        Args:
+            model: 저장할 모델
+            output_dir: 저장할 디렉토리
+        """
+        # 모델 저장
+        model_to_save = model.module if hasattr(model, "module") else model
+        model_to_save.save_pretrained(output_dir)
+        self.tokenizer.save_pretrained(output_dir)
+        
+        # README.md 생성
+        readme_content = f"""
+
+# {self.config.task} Model
+
+## Model Details
+- Task: {self.config.task}
+- Base Model: {self.config.model_name}
+- Categories: {', '.join(self.config.category)}
+- Labels: {', '.join(self.config.label_list)}
+
+## Training Details
+- Max Sequence Length: {self.config.max_seq_len}
+- Batch Size: {self.config.train_batch_size}
+- Learning Rate: {self.config.learning_rate}
+- Epochs: {self.config.epochs}
+- Early Stopping Patience: {self.config.early_stopping_patience}
+"""
+        
+        with open(output_dir / "README.md", "w", encoding="utf-8") as f:
+            f.write(readme_content)
+        
+        self.logger.debug(f"💾 Model saved to {output_dir}")
+
+class SentimentTrainer(BaseTrainer):
+    def __init__(self, config: Config) -> None:
+        super().__init__(config)
+    
     def create_examples(self, lines: list[dict], mode: str) -> list[InputExample]:
         """
         Create InputExample objects from a list of dictionaries.
@@ -97,55 +206,24 @@ class BaseTrainer:
                 label: str = label_dict.get(cat, "none")
                 examples.append(InputExample(guid=guid, sentence=sentence, category=cat, label=label))
         return examples
+    
+    def convert_to_dataset(self, features: list[InputFeatures|Input_Category_Features]) -> torch.utils.data.Dataset:
+            # Create a TensorDataset from the features
+            all_input_ids: torch.Tensor = torch.tensor([f.input_ids for f in features], dtype=torch.long)
+            all_attention_mask: torch.Tensor = torch.tensor([f.attention_mask for f in features], dtype=torch.long)
+            all_token_type_ids: torch.Tensor = torch.tensor([f.token_type_ids for f in features], dtype=torch.long)
+            all_labels: torch.Tensor = torch.tensor([f.label for f in features], dtype=torch.long)
 
-    def load_and_cache_examples(self, mode: str) -> ConcatDataset:
-        """
-        Load and cache examples from a file.
-        Args:
-            mode: The mode of the dataset.
-        Returns:
-            A ConcatDataset object.
-        """
-        
-        # Define the path to the cached features file
-        cached_features_dir: Path = self.model_dir / "interim" # /data/sentiment/model/interim
-        cached_features_dir.mkdir(parents=True, exist_ok=True)
-        
-        # 모델 이름에서 실제 모델 이름만 추출 (monologg/koelectra-small-v3-discriminator -> koelectra-small-v3-discriminator)
-        model_name = self.config.model_name.split("/")[-1] if "/" in self.config.model_name else self.config.model_name
-        cached_features_file: Path = cached_features_dir / f"cached_{model_name}_{str(self.config.max_seq_len)}_{mode}.pt"
-        
-        # Check if the cached features file exists
-        if cached_features_file.exists():
-            # If the cached features file exists, load it
-            features = torch.load(cached_features_file, weights_only=False)
-            self.logger.info(f"🔍 Loaded cached features from {cached_features_file}")
-        else:
-            # If the cached features file does not exist, create it and save it
-            self.logger.info(f"🔄 Creating features for {mode} dataset")
-            if mode == "train":
-                examples: list[InputExample] = self.create_examples(self.read_file(self.config.task_dir / "dataset" / self.config.train_file), mode)
-            elif mode == "test":
-                examples: list[InputExample] = self.create_examples(self.read_file(self.config.task_dir / "dataset" / self.config.test_file), mode)
-            else:
-                raise ValueError(f"Invalid mode: {mode}")
-
-            # Convert the examples to features
-            features = convert_examples_to_features(self.config, examples, self.tokenizer, self.config.max_seq_len)
-
-            # Save the features to the cached features file
-            # TODO: check if the file is saved correctly
-            torch.save(features, cached_features_file)
-            self.logger.info(f"💾 Saved features to {cached_features_file}")
-        
-        # Create a TensorDataset from the features
-        all_input_ids: torch.Tensor = torch.tensor([f.input_ids for f in features], dtype=torch.long)
-        all_attention_mask: torch.Tensor = torch.tensor([f.attention_mask for f in features], dtype=torch.long)
-        all_token_type_ids: torch.Tensor = torch.tensor([f.token_type_ids for f in features], dtype=torch.long)
-        all_labels: torch.Tensor = torch.tensor([f.label for f in features], dtype=torch.long)
-
-        dataset: TensorDataset = TensorDataset(all_input_ids, all_attention_mask, all_token_type_ids, all_labels)
-        return dataset
+            dataset: TensorDataset = TensorDataset(all_input_ids, all_attention_mask, all_token_type_ids, all_labels)
+            return dataset
+    
+    def convert_examples_to_features(self, examples: list[InputExample]) -> list[InputFeatures]:
+        return convert_examples_to_features(
+            config=self.config, 
+            examples=examples, 
+            tokenizer=self.tokenizer, 
+            max_length=self.config.max_seq_len
+            )
 
     def train(self) -> None:
         """
@@ -325,7 +403,6 @@ class BaseTrainer:
             self.logger.info(f"global_step = {global_step}, average loss = {tr_loss}")
             self.logger.info("-------------End Training-------------")
             
-
     def _train(self, 
                model: ElectraForSequenceClassification, 
                train_dataset: ConcatDataset, 
@@ -626,79 +703,3 @@ class BaseTrainer:
         self.logger.debug(f"📊 {mode.upper()} Results - Epoch {epoch}: Accuracy: {accuracy:.4f}, F1: {f1:.4f}, Loss: {eval_loss:.4f}")
         
         return result
-
-    def upload_to_huggingface(self, model_path: Path, repo_name: str, token: str) -> None:
-        """
-        학습된 모델을 Huggingface Hub에 업로드합니다.
-        Args:
-            model_path: 업로드할 모델의 경로
-            repo_name: Huggingface Hub의 저장소 이름 (예: "username/model-name")
-            token: Huggingface API 토큰
-        """
-        from huggingface_hub import HfApi, create_repo
-        
-        self.logger.info(f"🚀 Uploading model to Huggingface Hub: {repo_name}")
-        
-        try:
-            # 저장소가 없으면 생성
-            create_repo(repo_name, token=token, exist_ok=True)
-            
-            # API 클라이언트 생성
-            api = HfApi()
-            
-            # 모델 파일 업로드
-            api.upload_folder(
-                folder_path=model_path,
-                repo_id=repo_name,
-                token=token
-            )
-            
-            self.logger.info(f"✅ Model successfully uploaded to {repo_name}")
-            
-        except Exception as e:
-            self.logger.error(f"❌ Failed to upload model: {str(e)}")
-            raise
-
-    def save_best_model(self, model: ElectraForSequenceClassification, output_dir: Path) -> None:
-        """
-        최적의 모델을 저장합니다.
-        Args:
-            model: 저장할 모델
-            output_dir: 저장할 디렉토리
-        """
-        # 모델 저장
-        model_to_save = model.module if hasattr(model, "module") else model
-        model_to_save.save_pretrained(output_dir)
-        self.tokenizer.save_pretrained(output_dir)
-        
-        # README.md 생성
-        readme_content = f"""
-
-# {self.config.task} Model
-
-## Model Details
-- Task: {self.config.task}
-- Base Model: {self.config.model_name}
-- Categories: {', '.join(self.config.category)}
-- Labels: {', '.join(self.config.label_list)}
-
-## Training Details
-- Max Sequence Length: {self.config.max_seq_len}
-- Batch Size: {self.config.train_batch_size}
-- Learning Rate: {self.config.learning_rate}
-- Epochs: {self.config.epochs}
-- Early Stopping Patience: {self.config.early_stopping_patience}
-"""
-        
-        with open(output_dir / "README.md", "w", encoding="utf-8") as f:
-            f.write(readme_content)
-        
-        self.logger.debug(f"💾 Model saved to {output_dir}")
-
-class SentimentTrainer(BaseTrainer):
-    def __init__(self, config: Config) -> None:
-        super().__init__(config)
-
-class CategoryTrainer(BaseTrainer):
-    def __init__(self, config: Config) -> None:
-        super().__init__(config)
