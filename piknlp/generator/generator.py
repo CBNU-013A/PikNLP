@@ -13,7 +13,7 @@ from piknlp.common.config import Config
 from piknlp.common.logger import get_logger
 from piknlp.schema.generator import Review_Sentiment_Sample, Review_Category_Sample, SentimentList, CategoryList, Review_Sentiment_Label
 from piknlp.generator.llm import call_ollama as call_llm
-from piknlp.generator.llm import generate_dataset_prompt, generate_category_prompt
+from piknlp.generator.llm import generate_dataset_prompt, generate_category_prompt, generate_dataset_batch_prompt, generate_category_batch_prompt
 
 class Generator:
     logger: logging.Logger = get_logger(__name__)
@@ -103,9 +103,12 @@ class Generator:
                 json_str = match.group(0)
                 # JSON 파싱 시도
                 data = json.loads(json_str)
-                # categories 키가 없으면 추가
-                if "categories" not in data:
-                    data = {"categories": data}
+                # categories 또는 sentiments 키가 없으면 추가
+                if "categories" not in data and "sentiments" not in data:
+                    if self.config.task == "category":
+                        data = {"categories": data}
+                    elif self.config.task == "sentiment":
+                        data = {"sentiments": data}
                 return json.dumps(data, ensure_ascii=False)
         except Exception as e:
             self.logger.error(f"⚠️ JSON extraction failed: {e}")
