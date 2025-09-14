@@ -30,6 +30,10 @@ class Generator:
         reviews: list[str] = self._load_csv(raw_file_path)
         labeled_data: list[Review_Sentiment_Sample | Review_Category_Sample] = []
 
+        # 리뷰를 5개씩 묶어서 배치 생성
+        batch_size = 5
+        review_batches = [reviews[i:i + batch_size] for i in range(0, len(reviews), batch_size)]
+        
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
@@ -38,16 +42,17 @@ class Generator:
             TimeElapsedColumn(),
             TimeRemainingColumn(),
         ) as progress:
-            task = progress.add_task("[green]리뷰 처리 중...", total=len(reviews))
+            task = progress.add_task("[green]리뷰 배치 처리 중...", total=len(review_batches))
             with ThreadPoolExecutor(max_workers=self.config.num_workers) as executor:
-                futures = [executor.submit(self._process_review, review) for review in reviews]
+                futures = [executor.submit(self._process_review_batch, batch) for batch in review_batches]
                 for f in as_completed(futures):
                     try:
-                        sample = f.result()
-                        if sample.label:  # 유효한 레이블이 있는 경우만 추가
-                            labeled_data.append(sample)
+                        batch_samples = f.result()
+                        for sample in batch_samples:
+                            if sample.label:  # 유효한 레이블이 있는 경우만 추가
+                                labeled_data.append(sample)
                     except Exception as e:
-                        self.logger.error(f"Error processing review: {e}")
+                        self.logger.error(f"Error processing review batch: {e}")
                     finally:
                         progress.update(task, advance=1)
         
@@ -129,6 +134,57 @@ class Generator:
             self.logger.error(f"Error parsing labels: {e}")
             return []
     
+    def _process_review_batch(self, reviews: list[str]) -> list[Review_Sentiment_Sample | Review_Category_Sample]:
+        """리뷰 배치를 처리하여 개별 샘플들을 반환"""
+        if self.config.task == "category":
+            prompt = generate_category_batch_prompt(reviews, self.config.category)
+        elif self.config.task == "sentiment":
+            prompt = generate_dataset_batch_prompt(reviews, self.config.category)
+        else:
+            raise ValueError(f"Invalid task: {self.config.task}")
+
+        raw_response = call_llm(prompt)
+        clean_response = self._extract_json(raw_response)
+        
+        samples = []
+        try:
+            # 배치 응답 파싱
+            batch_data = json.loads(clean_response)
+            results = batch_data.get("results", [])
+            
+            for i, result in enumerate(results):
+                review_text = result.get("review", reviews[i] if i < len(reviews) else "")
+                
+                if self.config.task == "sentiment":
+                    sentiments = result.get("sentiments", {})
+                    labels = [
+                        Review_Sentiment_Label(category=cat, review=sentiment)
+                        for cat, sentiment in sentiments.items()
+                    ]
+                    sample = Review_Sentiment_Sample(sentence=review_text, label=labels)
+                elif self.config.task == "category":
+                    categories = result.get("categories", {})
+                    sample = Review_Category_Sample(sentence=review_text, label=categories)
+                else:
+                    continue
+                    
+                samples.append(sample)
+                
+        except Exception as e:
+            self.logger.error(f"Error parsing batch response: {e}")
+            self.logger.debug(f"Raw response: {raw_response}")
+            self.logger.debug(f"Cleaned response: {clean_response}")
+            # 배치 처리 실패 시 개별 처리로 폴백
+            for review in reviews:
+                try:
+                    sample = self._process_review(review)
+                    samples.append(sample)
+                except Exception as individual_error:
+                    self.logger.error(f"Error processing individual review: {individual_error}")
+                    continue
+        
+        return samples
+
     def _process_review(self, review: str) -> Review_Sentiment_Sample | Review_Category_Sample:
         if self.config.task == "category":
             prompt = generate_category_prompt(review, self.config.category)
