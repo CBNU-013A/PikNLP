@@ -26,7 +26,7 @@ class Config:
         self.raw_data_file: str = cfg.get("raw_data_file", "reviews.csv")
         self.dataset_file: str = cfg.get("dataset_file", "dataset.jsonl")
         self.llm: str = cfg.get("llm_model_name", "exaone3.5")
-        self.category: list[str] = cfg.get("category", []) # Category for Sentiment Analysis labels
+        self.category: dict[str, list[str]] = cfg.get("category", {}) # Category for Sentiment Analysis labels
         self.label_list: list[str] = cfg.get("label_list", []) # Sentiment labels
         self.split_ratio: dict[str, float|int] = cfg.get("split", {})
         self.num_workers: int = cfg.get("num_workers", 5)
@@ -54,6 +54,7 @@ class Config:
         self.warmup_proportion: float = cfg.get("warmup_proportion", 0.1)
         self.max_grad_norm: float = cfg.get("max_grad_norm", 1.0)
         self.early_stopping_patience: int = cfg.get("early_stopping_patience", 3)
+        self.dropout_rate: float = cfg.get("dropout_rate", 0.1)
         
         # Evaluation parameters
         self.eval_num_workers: int = cfg.get("eval_num_workers", 4)

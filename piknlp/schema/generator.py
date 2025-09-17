@@ -3,13 +3,20 @@
 from pydantic import BaseModel
 from typing import Literal
 
-class ReviewLabel(BaseModel):
+class Review_Sentiment_Label(BaseModel):
     category: str
     review: Literal["pos", "neg", "none"]
 
-class ReviewSample(BaseModel):
+class Review_Sentiment_Sample(BaseModel):
     sentence: str
-    label: list[ReviewLabel]
+    label: list[Review_Sentiment_Label]
 
 class SentimentList(BaseModel):
     sentiments: dict[str, Literal["pos", "neg", "none"]]
+
+class Review_Category_Sample(BaseModel):
+    sentence: str
+    label: dict[str, str]
+
+class CategoryList(BaseModel):
+    categories: dict[str, str]
