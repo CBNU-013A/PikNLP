@@ -5,7 +5,7 @@ from pathlib import Path
 from piknlp.common.logger import get_logger
 
 class Config:
-    def __init__(self, config_path: Path = Path("config/train_category_config.yaml")):
+    def __init__(self, config_path: Path = Path("config/train_config.yaml")):
         self.logger = get_logger(__name__)
 
         self.logger.info(f"🔍 Loading config from {config_path}")
